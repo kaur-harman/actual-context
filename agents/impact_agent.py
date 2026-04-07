@@ -143,7 +143,7 @@ def save_impact_tool(
     sector_impact: str,
     reasoning_chain: str,
     should_flag: bool,
-    flag_reason: str = ""
+    flag_reason: str
 ) -> dict:
     """
     Save the final impact analysis to AlloyDB and optionally flag for follow-up.

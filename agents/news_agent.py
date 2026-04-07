@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import List
 from google.adk import Agent
 from google.adk.tools.tool_context import ToolContext
 from tools.mcp_tools import (
@@ -53,7 +54,7 @@ def save_news_event_tool(
     validated: bool,
     event_type: str,
     mechanism: str,
-    affected_sectors: list,
+    affected_sectors: List[str],
     lag_months: int,
     severity: str
 ) -> dict:

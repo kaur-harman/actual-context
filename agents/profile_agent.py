@@ -3,11 +3,11 @@ import logging
 from google.adk import Agent
 from google.adk.tools.tool_context import ToolContext
 from db.client import save_user_profile, get_user_profile
- 
+
 logging.basicConfig(level=logging.INFO)
- 
+
 # ── Tools ──────────────────────────────────────────────────────────────────
- 
+
 def save_profile_tool(
     tool_context: ToolContext,
     name: str,
@@ -20,12 +20,11 @@ def save_profile_tool(
     home_loan_emi: float,
     mutual_fund_value: float,
     mf_type: str,
-    dependents: int,
-    travel_plans: str
+    dependents: int
 ) -> dict:
     """
     Saves the user profile to AlloyDB after collecting all details.
-    Call this once you have answers to ALL questions.
+    Call this once you have parsed all fields from the user's response.
     """
     profile = {
         "name": name,
@@ -42,8 +41,7 @@ def save_profile_tool(
             "mutual_fund_value": mutual_fund_value,
             "mf_type": mf_type
         },
-        "dependents": dependents,
-        "travel_plans": travel_plans
+        "dependents": dependents
     }
     try:
         user_id = save_user_profile(profile)
@@ -54,7 +52,7 @@ def save_profile_tool(
     except Exception as e:
         logging.error(f"[ProfileAgent] Save failed: {e}")
         return {"status": "error", "message": str(e)}
- 
+
 def load_profile_tool(
     tool_context: ToolContext,
     user_id: str
@@ -69,9 +67,9 @@ def load_profile_tool(
         return {"status": "not_found"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
- 
+
 # ── Agent ──────────────────────────────────────────────────────────────────
- 
+
 profile_agent = Agent(
     name="profile_agent",
     model="gemini-2.5-flash",
@@ -81,25 +79,29 @@ profile_agent = Agent(
     ),
     instruction="""
 You are a friendly financial context collector for NewsContext AI.
-Your job is to collect the user's personal profile so we can translate
-news into personal impact. Be warm, conversational, and brief.
- 
-Ask these questions ONE AT A TIME in natural conversation order:
-1. What is your name?
-2. How old are you and which city do you live in?
-3. What sector do you work in (e.g. IT, banking, manufacturing, govt)?
-4. What is your approximate annual income (in LPA)?
-5. Do you have a home loan? If yes: loan amount (₹), interest rate (%), and monthly EMI (₹)?
-   If no home loan, enter 0 for all three.
-6. Do you invest in mutual funds? If yes: current value (₹) and type (equity/debt/hybrid)?
-   If no, enter 0 and "none".
-7. How many dependents do you have (spouse, children, parents)?
-8. Any travel plans in the next 6 months? (destination or "none")
- 
-Once you have ALL answers, call save_profile_tool with the collected data.
-After saving, confirm: "Your profile is saved! You can now paste any news headline
+Your job is to collect the user's profile in a SINGLE prompt — ask everything at once.
+
+STEP 1 — Send this exact message to the user:
+
+"To personalise your news impact, I need a few quick details. Please fill in the form below:
+
+• Name:
+• Age & City:
+• Work sector (IT / banking / manufacturing / govt / other):
+• Annual income (LPA):
+• Home loan — Amount (₹) | Interest rate (%) | Monthly EMI (₹)  [enter 0 | 0 | 0 if none]
+• Mutual funds — Current value (₹) | Type (equity / debt / hybrid)  [enter 0 | none if none]
+• Number of dependents (spouse, children, parents):"
+
+STEP 2 — Once the user replies, parse all fields from their response.
+If any field is missing or unclear, ask only for the missing fields (not the whole form again).
+
+STEP 3 — Call save_profile_tool with all parsed values.
+For missing home loan or MF values, default to 0 / "none".
+
+STEP 4 — Confirm: "Your profile is saved! You can now paste any news headline
 and I'll tell you exactly how it affects you."
- 
+
 If the user says they already have a profile, ask for their user_id and call load_profile_tool.
 """,
     tools=[save_profile_tool, load_profile_tool],

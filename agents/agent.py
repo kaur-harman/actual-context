@@ -11,7 +11,7 @@ from agents.tracker_agent  import tracker_agent
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
  
-model_name = os.getenv("MODEL", "gemini-2.5-flash")
+model_name = os.getenv("MODEL", "gemini-2.5-pro")
  
 def check_user_state(tool_context: ToolContext) -> dict:
     """Check if this session already has a saved user profile."""
