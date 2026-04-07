@@ -1,0 +1,9 @@
+google-adk==1.14.0
+toolbox-core
+psycopg2-binary
+python-dotenv
+google-cloud-logging
+google-auth
+google-auth-httplib2
+requests
+feedparser
