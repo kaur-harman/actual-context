@@ -1,77 +1,144 @@
-import os
-import logging
+import os, logging, re, json
+from typing import List
 from dotenv import load_dotenv
 from google.adk import Agent
 from google.adk.tools.tool_context import ToolContext
-from agents.profile_agent  import profile_agent
-from agents.news_agent     import news_agent
-from agents.impact_agent   import impact_agent
-from agents.tracker_agent  import tracker_agent
- 
+from agents.profile_agent import profile_agent
+from agents.impact_agent  import impact_agent
+from tools.mcp_tools import validate_news_from_feeds, get_rbi_repo_rate_context
+from db.firestore_client import save_news_event
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
- 
-model_name = os.getenv("MODEL", "gemini-2.5-pro")
- 
+model_name = os.getenv("MODEL", "gemini-2.0-flash")
+UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
 def check_user_state(tool_context: ToolContext) -> dict:
-    """Check if this session already has a saved user profile."""
-    user_id = tool_context.state.get("user_id", "")
     return {
-        "has_profile": bool(user_id),
-        "user_id":     user_id if user_id else None
+        "has_profile": bool(tool_context.state.get("user_id")),
+        "stage":       tool_context.state.get("stage", "")
     }
- 
+
+def is_uuid(tool_context: ToolContext, text: str) -> dict:
+    return {"is_uuid": bool(UUID_RE.match(text.strip()))}
+
+def set_stage(tool_context: ToolContext, stage: str) -> dict:
+    tool_context.state["stage"] = stage
+    return {"stage": stage}
+
+def process_news_tool(tool_context: ToolContext, headline: str) -> dict:
+    validation = validate_news_from_feeds(headline)
+    tool_context.state["news_headline"] = headline
+    tool_context.state["news_validated"] = validation.get("validated", False)
+    rbi_context = {}
+    if any(k in headline.lower() for k in ["rbi","repo","rate","inflation","mpc","bps"]):
+        rbi_context = get_rbi_repo_rate_context()
+        tool_context.state["rbi_context"] = json.dumps(rbi_context)
+    event_id = save_news_event({
+        "headline": headline, "source_url": "",
+        "validated": validation.get("validated", False),
+        "causal_chain": {}, "affected_sectors": []
+    })
+    tool_context.state["event_id"] = event_id
+    return {
+        "headline": headline,
+        "validated": validation.get("validated", False),
+        "confidence": validation.get("confidence", "low"),
+        "sources": validation.get("matched_sources", []),
+        "rbi_context": rbi_context,
+        "event_id": event_id
+    }
+
+def save_causal_chain_tool(
+    tool_context: ToolContext,
+    event_type: str,
+    mechanism: str,
+    affected_sectors: List[str],
+    lag_months: int,
+    severity: str,
+    summary: str
+) -> dict:
+    causal_chain = {
+        "event_type": event_type,
+        "mechanism": mechanism,
+        "affected_sectors": affected_sectors,
+        "lag_months": lag_months,
+        "severity": severity,
+        "summary": summary
+    }
+    tool_context.state["causal_chain"] = json.dumps(causal_chain)
+    return {"status": "saved", "causal_chain": causal_chain}
+
 root_agent = Agent(
     name="newscontext_orchestrator",
     model=model_name,
-    description=(
-        "NewsContext AI — translates any Indian financial or economic news "
-        "into direct personal impact with specific rupee numbers."
-    ),
+    description="NewsContext AI — any news into personal rupee impact",
     instruction="""
-You are NewsContext AI — a personal news impact assistant for Indian users.
-Core promise: specific numbers, not generic advice. Every response is
-tailored to THIS user's exact financial situation.
- 
-YOUR AGENTS:
-1. profile_agent          — collects and stores user financial profile
-2. news_intelligence_agent — validates news + extracts causal chain
-3. personal_impact_translator — computes exact rupee impact per user
-4. followup_tracker_agent  — checks and manages follow-up alerts
- 
-ROUTING LOGIC — follow exactly:
- 
-CASE 1 — NEW USER (first message):
-Call check_user_state. If has_profile=False:
-Say: "Welcome to NewsContext AI! I translate financial news into YOUR
-personal impact — specific numbers, not generic advice. Let me collect
-a few details about your financial situation first."
-→ Transfer to profile_agent
- 
-CASE 2 — RETURNING USER pastes a news headline:
-If has_profile=True:
-  a. Transfer to followup_tracker_agent first (checks silently for follow-ups)
-  b. Transfer to news_intelligence_agent (validates + extracts causal chain)
-  c. Transfer to personal_impact_translator (computes rupee impact)
-Run a→b→c in sequence. Do not skip any step.
- 
-CASE 3 — USER ASKS "what am I tracking?" or "my alerts":
-→ Transfer to followup_tracker_agent
- 
-CASE 4 — USER WANTS TO UPDATE PROFILE:
-→ Transfer to profile_agent
- 
-CASE 5 — USER ASKS "what is my user ID?":
-Return tool_context.state.get("user_id", "No profile saved in this session.")
- 
-NEVER:
-- Skip news_intelligence_agent before personal_impact_translator
-- Give generic statements like "rates may rise"
-- Make up rupee numbers without running compute tools
-- Forget to run followup_tracker_agent for returning users
- 
-TONE: Professional but warm. You are a trusted financial advisor, not a chatbot.
+You are NewsContext AI. You translate any news into personal rupee impact.
+
+EVERY TURN:
+1. Call check_user_state
+2. Call is_uuid with user input
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STAGE CHECK (always first)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If stage == "impact":
+  Transfer to personal_impact_translator
+  Call set_stage("")
+  STOP
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NO PROFILE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If has_profile == False:
+  If is_uuid == True → Transfer to profile_agent → STOP
+  If input == "new"  → Transfer to profile_agent → STOP
+  Else → Say:
+    "Welcome to NewsContext AI.
+    I translate ANY news — rates, wars, oil, trade — into your personal ₹ impact.
+    Paste your user ID or type 'new' to set up your profile."
+  STOP
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HAS PROFILE + stage == ""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If input is "hi"/"hello"/"hey":
+  Say: "Profile loaded. Paste any news headline." → STOP
+
+If input is "update profile":
+  Transfer to profile_agent → STOP
+
+If is_uuid == True:
+  Say: "Profile already loaded. Paste a news headline." → STOP
+
+OTHERWISE (news headline):
+  Do ALL 5 steps in ONE turn:
+
+  1. Call process_news_tool with the headline
+  2. Extract causal chain:
+     event_type: monetary_policy | geopolitical | commodity | trade_agreement | global_macro | budget | regulation
+     mechanism: ONE sentence
+     affected_sectors: list
+     lag_months: integer 0-12
+     severity: low | medium | high
+     summary: 1-2 sentences
+  3. Call save_causal_chain_tool
+  4. Call set_stage("impact")
+  5. Transfer to personal_impact_translator
+
+  CRITICAL: All 5 steps in ONE turn. Never stop between them.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Stage check always first
+- Never re-store headline or loop
+- Never output text while processing news
 """,
-    tools=[check_user_state],
-    sub_agents=[profile_agent, news_agent, impact_agent, tracker_agent],
+    tools=[check_user_state, is_uuid, set_stage, process_news_tool, save_causal_chain_tool],
+    sub_agents=[profile_agent, impact_agent],
 )
